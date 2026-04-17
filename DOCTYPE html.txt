@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hollow Knight - Full Replica</title>
+    <style>
+        body { margin: 0; background: #050508; overflow: hidden; display: flex; justify-content: center; align-items: center; height: 100vh; }
+        canvas { background: #0a0a12; border: 2px solid #1a1a25; image-rendering: pixelated; }
+        
+        #hud { position: absolute; top: 20px; left: 20px; font-family: 'serif'; color: white; pointer-events: none; }
+        .soul-orb { width: 50px; height: 50px; border: 2px solid #fff; border-radius: 50%; background: rgba(255,255,255,0.1); position: relative; overflow: hidden; }
+        #soul-fill { position: absolute; bottom: 0; width: 100%; height: 0%; background: #fff; transition: height 0.2s; }
+        
+        #boss-ui { position: absolute; bottom: 40px; left: 50%; transform: translateX(-50%); width: 400px; display: none; }
+        .hb-bg { width: 100%; height: 10px; background: #300; border: 1px solid #f44; }
+        #hb-fill { width: 100%; height: 100%; background: #f44; transition: width 0.1s; }
+        
+        #msg { position: absolute; top: 80px; left: 20px; color: #aaa; font-size: 12px; }
+    </style>
+</head>
+<body>
+
+    <div id="hud">
+        <div class="soul-orb"><div id="soul-fill"></div></div>
+        <div style="margin-top:10px;">GEO: <span id="geo-val">0</span></div>
+    </div>
+
+    <div id="msg">Z: Jump | X: Dash | C: Attack | S: Focus (Heal)</div>
+
+    <div id="boss-ui">
+        <div style="text-align:center; font-size:12px; margin-bottom:5px; color:#f44; letter-spacing:2px;">FALSE KNIGHT</div>
+        <div class="hb-bg"><div id="hb-fill"></div></div>
+    </div>
+
+    <canvas id="game"></canvas>
+
+    <script>
+        const canvas = document.getElementById('game');
+        const ctx = canvas.getContext('2d');
+        canvas.width = 800; canvas.height = 500;
+
+        // --- WORLD & CAMERA ---
+        const world = { width: 3000, height: 1000 };
+        const camera = { x: 0, y: 0 };
+        let geo = 0; let soul = 0;
+
+        // --- PLAYER ---
+        const player = {
+            x: 200, y: 800, w: 22, h: 36, vx: 0, vy: 0,
+            speed: 5, jumpForce: 11, grounded: false,
+            hasDoubleJumped: false, onWall: false, facing: 1,
+            canDash: true, isDashing: false, dashDist: 22,
+            isAttacking: false, isFocusing: false, focusTimer: 0
+        };
+
+        // --- LEVEL ---
+        const platforms = [
+            { x: 0, y: 950, w: 3000, h: 50 },
+            { x: 400, y: 850, w: 200, h: 20 },
+            { x: 1000, y: 850, w: 800, h: 20 },
+            { x: 1800, y: 700, w: 200, h: 250 } // A wall to climb
+        ];
+
+        const hazards = [{ x: 700, y: 940, w: 250, h: 10 }];
+
+        // --- BOSS ---
+        const boss = {
+            x: 1400, y: 800, w: 70, h: 100,
+            vx: 0, vy: 0, health: 100, active: false, jumpTimer: 0
+        };
+
+        const keys = {};
+        window.onkeydown = (e) => {
+            if (e.code === 'KeyZ') {
+                if (player.grounded) { player.vy = -player.jumpForce; player.grounded = false; player.hasDoubleJumped = false; }
+                else if (!player.hasDoubleJumped) { player.vy = -player.jumpForce * 0.9; player.hasDoubleJumped = true; }
+            }
+            keys[e.code] = true;
+        };
+        window.onkeyup = (e) => keys[e.code] = false;
+
+        function update() {
+            // 1. FOCUSING (HEALING)
+            if (keys['KeyS'] && player.grounded && soul >= 33) {
+                player.isFocusing = true;
+                player.vx = 0; // Can't move while focusing
+                player.focusTimer++;
+                if (player.focusTimer > 60) { // Approx 1 second
+                    soul -= 33;
+                    player.focusTimer = 0;
+                    updateSoulUI();
+                }
+            } else {
+                player.isFocusing = false;
+                player.focusTimer = 0;
+            }
+
+            // 2. MOVEMENT
+            if (!player.isDashing && !player.isFocusing) {
+                if (keys['ArrowRight']) { player.vx = player.speed; player.facing = 1; }
+                else if (keys['ArrowLeft']) { player.vx = -player.speed; player.facing = -1; }
+                else { player.vx *= 0.8; }
+            }
+
+            // 3. DASH
+            if (keys['KeyX'] && player.canDash && !player.isFocusing) {
+                player.isDashing = true; player.canDash = false;
+                player.vx = player.facing * player.dashDist; player.vy = 0;
+                setTimeout(() => player.isDashing = false, 180);
+                setTimeout(() => player.canDash = true, 700);
+            }
+
+            // 4. ATTACK
+            if (keys['KeyC'] && !player.isAttacking && !player.isFocusing) {
+                player.isAttacking = true;
+                checkCombatHit();
+                setTimeout(() => player.isAttacking = false, 150);
+            }
+
+            // 5. PHYSICS
+            player.vy += 0.55;
+            player.x += player.vx;
+            player.y += player.vy;
+
+            // 6. COLLISIONS
+            player.grounded = false;
+            platforms.forEach(p => {
+                if (player.x < p.x + p.w && player.x + player.w > p.x && player.y < p.y + p.h && player.y + player.h > p.y) {
+                    if (player.vy > 0) { player.y = p.y - player.h; player.vy = 0; player.grounded = true; player.hasDoubleJumped = false; }
+                }
+            });
+
+            // 7. HAZARDS
+            hazards.forEach(h => {
+                if (player.x < h.x + h.w && player.x + player.w > h.x && player.y < h.y + h.h && player.y + player.h > h.y) {
+                    player.x = 200; player.y = 800;
+                }
+            });
+
+            // 8. BOSS AI
+            if (player.x > 1000 && !boss.active) {
+                boss.active = true;
+                document.getElementById('boss-ui').style.display = 'block';
+            }
+            if (boss.active && boss.health > 0) {
+                boss.vy += 0.5; boss.y += boss.vy; boss.x += boss.vx;
+                if (boss.y > 950 - boss.h) { boss.y = 950 - boss.h; boss.vy = 0; boss.vx = 0; }
+                boss.jumpTimer++;
+                if (boss.jumpTimer > 100) {
+                    boss.vy = -12; boss.vx = (player.x < boss.x) ? -5 : 5;
+                    boss.jumpTimer = 0;
+                }
+            }
+
+            // 9. CAMERA
+            camera.x = player.x - canvas.width / 2;
+            camera.y = player.y - canvas.height / 2;
+            camera.x = Math.max(0, Math.min(camera.x, world.width - canvas.width));
+            camera.y = Math.max(0, Math.min(camera.y, world.height - canvas.height));
+
+            draw();
+            requestAnimationFrame(update);
+        }
+
+        function updateSoulUI() {
+            document.getElementById('soul-fill').style.height = soul + "%";
+        }
+
+        function checkCombatHit() {
+            const hitArea = { x: player.facing === 1 ? player.x + player.w : player.x - 45, y: player.y - 10, w: 45, h: 60 };
+            if (boss.active && boss.health > 0) {
+                if (hitArea.x < boss.x + boss.w && hitArea.x + hitArea.w > boss.x && hitArea.y < boss.y + boss.h && hitArea.y + hitArea.w > boss.y) {
+                    boss.health -= 5;
+                    soul = Math.min(100, soul + 11);
+                    updateSoulUI();
+                    document.getElementById('hb-fill').style.width = boss.health + "%";
+                    if (boss.health <= 0) geo += 1000;
+                }
+            }
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.save();
+            ctx.translate(-camera.x, -camera.y);
+
+            // Spikes
+            ctx.fillStyle = "#555";
+            hazards.forEach(h => {
+                for(let i=0; i<h.w; i+=10) {
+                    ctx.beginPath(); ctx.moveTo(h.x+i, h.y+h.h); ctx.lineTo(h.x+i+5, h.y); ctx.lineTo(h.x+i+10, h.y+h.h); ctx.fill();
+                }
+            });
+
+            // Level
+            ctx.fillStyle = "#12121e";
+            platforms.forEach(p => ctx.fillRect(p.x, p.y, p.w, p.h));
+            
+            // Boss
+            if (boss.active && boss.health > 0) {
+                ctx.fillStyle = "#444"; ctx.fillRect(boss.x, boss.y, boss.w, boss.h);
+                ctx.fillStyle = "white"; ctx.fillRect(boss.x+15, boss.y+15, 10, 10); ctx.fillRect(boss.x+45, boss.y+15, 10, 10);
+            }
+
+            // Player Focus Effect
+            if (player.isFocusing) {
+                ctx.strokeStyle = "white";
+                ctx.lineWidth = 2;
+                ctx.strokeRect(player.x - 5, player.y - 5, player.w + 10, player.h + 10);
+            }
+
+            // Player Attack
+            if (player.isAttacking) {
+                ctx.fillStyle = "rgba(255,255,255,0.4)";
+                const sx = player.facing === 1 ? player.x + player.w : player.x - 45;
+                ctx.fillRect(sx, player.y - 5, 45, 50);
+            }
+
+            // Player
+            ctx.fillStyle = "white"; ctx.fillRect(player.x, player.y, player.w, player.h);
+            ctx.fillStyle = "black";
+            let ex = player.facing === 1 ? player.x + 12 : player.x + 4;
+            ctx.fillRect(ex, player.y + 10, 4, 8); ctx.fillRect(ex + 6, player.y + 10, 4, 8);
+
+            ctx.restore();
+        }
+
+        update();
+    </script>
+</body>
+</html>
